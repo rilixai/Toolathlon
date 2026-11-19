@@ -1,0 +1,4 @@
+# Keep the hosted source archive within Beaker's size limit. Rollouts read
+# task inputs from the pinned git checkout, which retains these files.
+/assets/demo.gif export-ignore
+/tasks/finalpool/*/initial_workspace export-ignore
