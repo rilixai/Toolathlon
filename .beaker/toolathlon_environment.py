@@ -130,7 +130,12 @@ def shared_checkout(cache: Path, source: Path) -> Path:
         for name in ("toolathlon_container_agent.py", "toolathlon_native_trace.py"):
             shutil.copyfile(HERE / name, root / name)
         poste = root / "deployment/poste/scripts/setup.sh"
-        poste.write_text(poste.read_text().replace("analogic/poste.io:2.5.5", "analogic/poste.io:2.5.24"))
+        poste.write_text(
+            poste.read_text().replace(
+                "analogic/poste.io:2.5.5",
+                "analogic/poste.io@sha256:5acf59d94bfd2873040377d24dc3ae5607257df9032e73b9913e1998843ff4aa",
+            )
+        )
         (root / ".ready").write_text("")
     return root
 
