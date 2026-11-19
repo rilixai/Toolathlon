@@ -2,3 +2,6 @@
 # task inputs from the pinned git checkout, which retains these files.
 /assets/demo.gif export-ignore
 /tasks/finalpool/*/initial_workspace export-ignore
+
+# Install benchmark dependencies from the pinned checkout, outside the hosted worker's Python environment.
+/pyproject.toml export-ignore
