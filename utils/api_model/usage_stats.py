@@ -82,6 +82,7 @@ def add_cached_token_details(usage: Any, provider_usage: Any) -> Any:
         getattr(usage, "input_tokens", 0),
         extract_cached_input_tokens(provider_usage),
     )
+    usage.input_tokens_details = usage.input_tokens_details.model_copy(update={"cached_tokens": cached_tokens or 0})
     setattr(usage, "cached_input_tokens", cached_tokens)
     setattr(usage, "non_cached_input_tokens", non_cached_tokens)
     return usage

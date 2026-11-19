@@ -212,6 +212,8 @@ FILES_TO_COPY=(
     "local_binary/github-mcp-server"
     "utils"
     "main.py"
+    "pyproject.toml"
+    "uv.lock"
 )
 
 # Verify all required files/directories exist

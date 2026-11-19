@@ -39,6 +39,8 @@ async def main():
                        help="Model name")
     parser.add_argument("--provider", type=str, default="unified", 
                        help="Provider")
+    parser.add_argument("--agent_only", action="store_true",
+                        help="Run the original agent without the trusted inline evaluator")
     args = parser.parse_args()
     
     # Set Proxy (if needed)
@@ -81,6 +83,9 @@ async def main():
     print_color(f"\n====== Task completed with status ======", "yellow")
     print(f"Status: {task_status.value} ")
     
+    if args.agent_only:
+        return 0
+
     # Evaluate results
     print_color("\n====== Starting Task Evaluation ======", "yellow")
     log_file = task_config.log_file

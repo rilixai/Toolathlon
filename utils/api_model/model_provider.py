@@ -7,10 +7,9 @@ from agents import (
     OpenAIChatCompletionsModel,
     OpenAIResponsesModel,
     Model,
-    set_tracing_disabled,
     _debug
 )
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, NOT_GIVEN, NotGiven
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText, ResponseReasoningItem, ResponseStreamEvent
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
@@ -26,7 +25,10 @@ from pydantic import BaseModel
 
 from agents.models.chatcmpl_converter import *
 
-from typing import Any, List, Union
+from typing import Any, List, Union, cast
+from openai.types.chat import ChatCompletionMessageFunctionToolCallParam as ChatCompletionMessageToolCallParam
+from agents.util._error_tracing import model_span_errors
+from utils.openai_agents_monkey_patch.custom_run_impl import _canonicalize_tool_call
 from typing_extensions import Literal, Annotated, TypeAlias
 from openai._utils import PropertyInfo
 
@@ -438,6 +440,10 @@ class ContextTooLongError(Exception):
         self.max_tokens = max_tokens
 
 class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
+    @staticmethod
+    def _non_null_or_not_given(value):
+        return NOT_GIVEN if value is None else value
+
     def __init__(self, model: str, 
                  openai_client: AsyncOpenAI, 
                  retry_times: int = 10, # FIXME: hardcoded now, should be dynamic
@@ -725,13 +731,17 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt=None,
     ) -> ModelResponse:
+        if previous_response_id is not None or conversation_id is not None or prompt is not None:
+            raise ValueError("Chat Completions does not support server-side conversations or prompts")
         with generation_span(
             model=str(self.model),
             model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
             disabled=tracing.is_disabled(),
-        ) as span_generation:
+        ) as span_generation, model_span_errors(span_generation, message="Error getting response", trace_include_sensitive_data=tracing.include_data()):
             response = await self._fetch_response(
                 system_instructions,
                 input,
@@ -791,9 +801,12 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
                     else []
                 )
 
+            names = [tool.name for tool in tools] + [handoff.tool_name for handoff in handoffs]
+            items = [_canonicalize_tool_call(item, names) if item.type == "function_call" else item for item in items]
             span_generation.span_data.usage = {
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
+                "input_tokens_details": usage.input_tokens_details.model_dump(),
             }
 
             return ModelResponse(
@@ -996,6 +1009,10 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
 
 
 class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
+    @staticmethod
+    def _non_null_or_not_given(value):
+        return NOT_GIVEN if value is None else value
+
     def __init__(self, model: str, 
                  openai_client: AsyncOpenAI, 
                  retry_times: int = 10, # FIXME: hardcoded now, should be dynamic
@@ -1106,8 +1123,10 @@ class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
         tools: list[Tool],
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         stream: Literal[True] | Literal[False] = False,
+        prompt=None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
 
@@ -1119,7 +1138,7 @@ class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
             else NOT_GIVEN
         )
 
-        tool_choice = OpenAIResponsesConverter.convert_tool_choice(model_settings.tool_choice)
+        tool_choice = OpenAIResponsesConverter.convert_tool_choice(model_settings.tool_choice, tools=tools, handoffs=handoffs, model=self.model)
         converted_tools = OpenAIResponsesConverter.convert_tools(tools, handoffs)
         response_format = OpenAIResponsesConverter.get_response_format(output_schema)
 
@@ -1191,7 +1210,15 @@ class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
             }
             base_params.update(extra_request_params)
 
-        return await self._client.responses.create(**base_params)
+        if conversation_id is not None:
+            base_params["conversation"] = conversation_id
+        if prompt is not None:
+            base_params["prompt"] = prompt
+        response = await self._client.responses.create(**base_params)
+        if not stream:
+            names = [tool.name for tool in tools] + [handoff.tool_name for handoff in handoffs]
+            response.output = [_canonicalize_tool_call(item, names) if item.type == "function_call" else item for item in response.output]
+        return response
 
 
 class CustomModelProviderAiHubMix(ModelProvider):
@@ -1621,7 +1648,7 @@ API_MAPPINGS = {
     # ),
 }
 
-set_tracing_disabled(disabled=True)
+
 
 def calculate_cost(model_name, input_tokens, output_tokens):
     # For local VLLM models, cost is 0

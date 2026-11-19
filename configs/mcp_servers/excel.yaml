@@ -7,8 +7,14 @@ params:
   command: uv
   args:
     - "run"
+    - "--project"
+    - "${project_root}"
+    - "--only-group"
+    - "excel"
     - "excel-mcp-server"
     - "stdio"
+  env:
+    UV_PROJECT_ENVIRONMENT: "${project_root}/.venv-excel"
   cwd: "${agent_workspace}"
 client_session_timeout_seconds: 100
 cache_tools_list: true
