@@ -107,6 +107,7 @@ class MCPServerManager:
         template_vars = {
             # Basic path variables
             'agent_workspace': self.agent_workspace,
+            'project_root': str(Path(__file__).resolve().parents[2]),
             'local_servers_paths': self.local_servers_paths,
             'local_binary_paths': self.local_binary_paths,
             'podman_or_docker': global_configs.podman_or_docker,

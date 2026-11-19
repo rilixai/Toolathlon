@@ -2,6 +2,7 @@
 from __future__ import annotations
 from agents.mcp.util import *
 from agents import _debug
+from agents.tracing import SpanError
 import json
 import os
 from typing import Any
@@ -122,11 +123,20 @@ def coerce_mcp_arguments(
 
 @classmethod
 def my_to_function_tool(
-    cls, tool: "MCPTool", server: "MCPServer", convert_schemas_to_strict: bool
+    cls, tool: "MCPTool", server: "MCPServer", convert_schemas_to_strict: bool,
+    agent=None, failure_error_function=None, tool_name_override=None,
 ) -> FunctionTool:
     """Convert an MCP tool to an Agents SDK function tool."""
-    invoke_func = functools.partial(cls.invoke_mcp_tool, server, tool)
-    schema, is_strict = tool.inputSchema, False
+    async def invoke_func(context, arguments):
+        try:
+            return await cls.invoke_mcp_tool(server, tool, context, arguments)
+        except Exception as error:
+            span = get_current_span()
+            if span is not None:
+                span.set_error(SpanError(message="Error running tool", data={"tool_name": tool.name, "error": str(error)}))
+            return f"Error running tool {to_model_mcp_tool_name(server.name, tool.name)}: {error}"
+    schema, is_strict = dict(tool.inputSchema), False
+    schema.setdefault("type", "object")
 
     # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
     if "properties" not in schema:

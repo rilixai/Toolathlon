@@ -1,26 +1,26 @@
 # context_managed_runner.py (English version)
 import json
-import asyncio
 from typing import Dict, Any, List, Union, Optional
 from datetime import datetime
 from pathlib import Path
 
 from agents import Runner, RunConfig, RunHooks, Agent, RunResult
-from agents.run_context import RunContextWrapper, TContext
+from agents.run_context import RunContextWrapper
 from agents.items import (
     RunItem, TResponseInputItem, MessageOutputItem, 
-    ToolCallItem, ToolCallOutputItem, ItemHelpers,
+    ItemHelpers,
     ModelResponse
 )
-from agents.tool import Tool
-from agents._run_impl import AgentToolUseTracker, SingleStepResult
+from agents.run_config import ModelInputData
+from types import SimpleNamespace
+import inspect
 
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from utils.api_model.model_provider import ContextTooLongError
-from agents.util import _coro
+
 
 
 # This is cirectly copied from agents/run.py in new version of openai-agents-sdk library
@@ -130,17 +130,49 @@ class ContextManagedRunner(Runner):
         # Record initial input to history (already managed by user side, skip here)
         # cls._save_initial_input_to_history(session_id, input, history_dir)
 
-        # Call the parent run method
-        result = await super().run(
-            starting_agent=starting_agent,
-            input=input,
-            context=wrapped_context,
-            max_turns=max_turns,
-            hooks=hooks,
-            run_config=run_config,
-            previous_response_id=previous_response_id,
-        )
-        
+        # SDK 0.20 exposes model-input filters and lifecycle hooks instead of
+        # Runner._run_single_turn. Keep this runner's original metadata,
+        # history format and truncation policies on those public boundaries.
+        tracker = wrapped_context.get("_server_conversation_tracker")
+        state = _ContextRun(cls, wrapped_context, input, hooks or RunHooks())
+        config = run_config or RunConfig()
+        upstream_filter = config.call_model_input_filter
+
+        async def filter_input(data):
+            filtered = state.filter_input(data.model_data)
+            if upstream_filter is not None:
+                filtered = upstream_filter(replace(data, model_data=filtered))
+                if inspect.isawaitable(filtered):
+                    filtered = await filtered
+            return filtered
+
+        try:
+            result = await super().run(
+                starting_agent=starting_agent,
+                input=input,
+                context=wrapped_context,
+                max_turns=max_turns,
+                hooks=state,
+                run_config=replace(config, call_model_input_filter=filter_input),
+                previous_response_id=(tracker.previous_response_id if tracker else previous_response_id),
+                auto_previous_response_id=bool(tracker and tracker.auto_previous_response_id),
+            )
+        except ContextTooLongError as error:
+            meta = wrapped_context["_context_meta"]
+            wrapped_context["_force_reset_context"] = {
+                "reason": str(error),
+                "token_count": error.token_count,
+                "max_tokens": error.max_tokens,
+                "timestamp": datetime.now().isoformat(),
+                "executed_mini_turns": meta["mini_turns_in_current_sequence"],
+                "executed_turns": meta["turns_in_current_sequence"],
+            }
+            raise
+        except Exception as error:
+            if getattr(error, "run_data", None) is not None:
+                state.finish(error.run_data)
+            raise
+        state.finish(result)
         return result
 
     @classmethod
@@ -206,226 +238,6 @@ class ContextManagedRunner(Runner):
         
         return context
 
-    @classmethod
-    async def _run_single_turn(
-        cls,
-        *,
-        agent: Agent[TContext],
-        all_tools: list[Tool],
-        original_input: str | list[TResponseInputItem],
-        generated_items: list[RunItem],
-        hooks: RunHooks[TContext],
-        context_wrapper: RunContextWrapper[TContext],
-        run_config: RunConfig,
-        should_run_agent_start_hooks: bool,
-        tool_use_tracker: AgentToolUseTracker,
-        previous_response_id: str | None,
-    ) -> SingleStepResult:
-        # print('----IN-----')
-        """Override single step execution, add history saving and truncation checking."""
-
-        # context_wrapper.context is our data storage
-        ctx = context_wrapper.context if context_wrapper and hasattr(context_wrapper, 'context') else {}
-
-        # Set the model's context window info
-        if ctx and ("_context_limit" not in ctx or ctx["_context_limit"] is None):
-            model_name = agent.model.model
-            from utils.api_model.model_provider import API_MAPPINGS
-            
-            context_limit_found = False
-            for key, mapping in API_MAPPINGS.items():
-                if model_name == key:
-                    ctx["_context_limit"] = mapping.context_window
-                    context_limit_found = True
-                    break
-                # Or check if in api_model mapping
-                elif 'api_model' in mapping:
-                    for provider, api_model_name in mapping.api_model.items():
-                        if model_name == api_model_name:
-                            ctx["_context_limit"] = mapping.context_window
-                            context_limit_found = True
-                            break
-                    if context_limit_found:
-                        break
-            
-            # # If not found, set to default
-            # if not context_limit_found:
-            #     ctx["_context_limit"] = 128000
-        # print("Model:", model_name, "context window", ctx["_context_limit"])
-
-        # Get server conversation tracker and previous response id
-        server_conversation_tracker = ctx.get("_server_conversation_tracker", None)
-        if server_conversation_tracker is not None:
-            # override the none value of previous_response_id from the tracker
-            previous_response_id = server_conversation_tracker.previous_response_id
-
-        # Get history directory
-        history_dir = Path(ctx.get("_history_dir", cls.DEFAULT_HISTORY_DIR))
-        
-        # Record number of generated items before execution, so we can identify new ones
-        # items_before = len(generated_items)
-
-        # Update turn info
-        # Get and update metadata
-        meta = ctx.get("_context_meta", {})
-        if "turns_in_current_sequence" not in meta:
-            meta["turns_in_current_sequence"] = 0
-
-        meta["current_turn"] = meta.get("current_turn", 0) + 1
-        meta["total_turns_ever"] = meta.get("total_turns_ever", 0) + 1
-        meta["turns_in_current_sequence"] = meta.get("turns_in_current_sequence", 0) + 1
-
-
-        # Call parent method for actual execution
-        try:
-            # now we have previous_response_id in kwargs if we use `openai_stateful_responses` as the provider
-
-            # MOST COPYIED FROM agents/run.py
-            # Ensure we run the hooks before anything else
-            if should_run_agent_start_hooks:
-                await asyncio.gather(
-                    hooks.on_agent_start(context_wrapper, agent),
-                    (
-                        agent.hooks.on_start(context_wrapper, agent)
-                        if agent.hooks
-                        else _coro.noop_coroutine()
-                    ),
-                )
-
-            system_prompt = await agent.get_system_prompt(context_wrapper)
-
-            output_schema = cls._get_output_schema(agent)
-            handoffs = cls._get_handoffs(agent)
-            
-            if server_conversation_tracker is not None:
-                input = server_conversation_tracker.prepare_input(original_input, generated_items)
-            else:
-                input = ItemHelpers.input_to_new_input_list(original_input)
-                input.extend([generated_item.to_input_item() for generated_item in generated_items])
-
-            new_response = await cls._get_new_response(
-                agent,
-                system_prompt,
-                input,
-                output_schema,
-                all_tools,
-                handoffs,
-                context_wrapper,
-                run_config,
-                tool_use_tracker,
-                previous_response_id,
-            )
-
-            ctx["_last_response_usage"] = {
-                "total_tokens": new_response.usage.total_tokens,
-                "input_tokens": new_response.usage.input_tokens,
-                "output_tokens": new_response.usage.output_tokens,
-                "requests": new_response.usage.requests,
-            }
-
-            result = await cls._get_single_step_result_from_response(
-                agent=agent,
-                original_input=original_input,
-                pre_step_items=generated_items,
-                new_response=new_response,
-                output_schema=output_schema,
-                all_tools=all_tools,
-                handoffs=handoffs,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                run_config=run_config,
-                tool_use_tracker=tool_use_tracker,
-            )
-
-            # if every thing is fine, we update the server conversation tracker
-            if server_conversation_tracker is not None:
-                server_conversation_tracker.track_server_items(result.model_response)
-        except ContextTooLongError as e:
-            # Flag need for forced context reset, record steps executed
-            ctx["_force_reset_context"] = {
-                "reason": str(e),
-                "token_count": getattr(e, 'token_count', None),
-                "max_tokens": getattr(e, 'max_tokens', None),
-                "timestamp": datetime.now().isoformat(),
-                "executed_mini_turns": meta.get("mini_turns_in_current_sequence", 0),
-                "executed_turns": meta.get("turns_in_current_sequence", 0)
-            }
-            # Raise to let upper logic handle
-            raise
-
-        meta["boundary_in_current_sequence"].append((meta["mini_turns_in_current_sequence"], 
-                                                     meta["mini_turns_in_current_sequence"]+len(result.new_step_items)))
-        # print("len(meta['boundary_in_current_sequence'])", len(meta["boundary_in_current_sequence"]))
-        # print("meta['turns_in_current_sequence']", meta["turns_in_current_sequence"])
-        
-        assert len(meta["boundary_in_current_sequence"]) == meta["turns_in_current_sequence"], (
-            f"Length of boundary_in_current_sequence does not match turns_in_current_sequence: "
-            f"{len(meta['boundary_in_current_sequence'])} != {meta['turns_in_current_sequence']}, "
-            f"boundary_in_current_sequence: {meta['boundary_in_current_sequence']}"
-        )
-        meta["mini_turns_in_current_sequence"] += len(result.new_step_items)
-
-        # Update cumulative usage info into context
-        if hasattr(context_wrapper, 'usage'):
-            ctx["_cumulative_usage"] = {
-                "total_tokens": context_wrapper.usage.total_tokens,
-                "input_tokens": context_wrapper.usage.input_tokens,
-                "output_tokens": context_wrapper.usage.output_tokens,
-                "requests": context_wrapper.usage.requests
-            }
-
-        # Save new items to history
-        session_id = ctx.get("_session_id")
-        # print("session_id", session_id, "len(generated_items)", len(generated_items), "items_before", items_before)
-        # if session_id and len(generated_items) > items_before:
-            # new_items = generated_items[items_before:]
-        cls._save_items_to_history(
-            session_id=session_id,
-            turn_number=meta.get("current_turn", 0),
-            items=result.new_step_items,
-            agent_name=agent.name if agent else "unknown",
-            history_dir=history_dir
-        )
-        
-        # Check for pending truncation request
-        pending_truncate = ctx.get("_pending_truncate")
-        # print("pending_truncate", pending_truncate)
-
-        # Get all sequential items; type is list[TResponseInputItem]
-        # all_seq_items = ItemHelpers.input_to_new_input_list(original_input)
-        # all_seq_items.extend([generated_item.to_input_item() for generated_item in generated_items])
-
-        # TODO: Currently we ignore pre_step_items and new_step_items, just use all_seq_items
-        # But that makes it impossible to tell which are pre_step_items and which new
-        # So a better solution is needed to handle this
-        if pending_truncate:
-            cls._handle_truncation(
-                original_input=original_input,
-                pre_step_items=result.pre_step_items,
-                new_step_items=result.new_step_items,
-                truncate_params=pending_truncate,
-                context_wrapper=context_wrapper
-            )
-            # Clear flag
-            ctx["_pending_truncate"] = None
-            
-            # # Optionally update turn_result
-            # result.original_input = original_input
-            # result.pre_step_items = []
-            # result.new_step_items = ctx["_truncated_items"]
-        # else:
-        #     result.original_input = []
-        #     result.pre_step_items = []
-        #     result.new_step_items = all_seq_items.copy()
-        
-        # # Update context statistics (optional)
-        # cls._update_context_stats(context_wrapper, generated_items)
-        
-        # print("result.next_step", result.next_step)
-        # print('----OUT-----')
-        
-        return result
-    
     @classmethod
     def _handle_truncation(
         cls,
@@ -1159,3 +971,111 @@ class ContextManagedRunner(Runner):
             
         
         return stats
+
+
+class _ContextRun(RunHooks):
+    """One invocation of the original context runner on SDK lifecycle hooks.
+
+    The SDK owns the unabridged run items. Retained indices persist Toolathlon's
+    deletions across requests and are also applied to the returned RunResult.
+    """
+
+    def __init__(self, runner, context, input, hooks):
+        self.runner, self.context, self.hooks = runner, context, hooks
+        self.initial_size = len(ItemHelpers.input_to_new_input_list(input))
+        self.seen = self.initial_size
+        self.retained = list(range(self.initial_size))
+        self.wrapper = RunContextWrapper(context)
+        self.agent = None
+        self.server_mode = context.get("_server_conversation_tracker") is not None
+        self.server_pending = []
+        self.server_seen = 0
+
+    def filter_input(self, model_data):
+        items = model_data.input
+        if not self.server_mode and len(items) < self.seen:
+            raise RuntimeError("Unexpected SDK conversation history size")
+        if self.server_mode:
+            # Server-side response chaining sends only unsent items. Archive
+            # the previous response plus its actual SDK-generated tool results,
+            # without interpreting the delta as the full local conversation.
+            if self.server_pending:
+                turn_items = self.server_pending + [item for item in items if item.get("type") == "function_call_output"]
+                self.record_turn(turn_items)
+                self.server_seen += len(turn_items)
+                self.server_pending = []
+            return model_data
+        new_items = items[self.seen:]
+        if new_items:
+            self.record_turn(new_items)
+            self.retained.extend(range(self.seen, len(items)))
+        self.seen = len(items)
+        selected = [items[index] for index in self.retained]
+        pending = self.context.get("_pending_truncate")
+        if pending:
+            # _handle_truncation mutates the selected list and rebases original
+            # turn boundaries; keep the corresponding SDK indices for later.
+            positions = {id(item): index for item, index in zip(selected, self.retained)}
+            self.runner._handle_truncation(selected, [], [], pending, self.wrapper)
+            self.retained = [positions[id(item)] for item in selected]
+            self.context["_pending_truncate"] = None
+        return ModelInputData(input=selected, instructions=model_data.instructions)
+
+    def record_turn(self, items):
+        if not items:
+            return
+        meta = self.context["_context_meta"]
+        start = meta["mini_turns_in_current_sequence"]
+        meta["boundary_in_current_sequence"].append((start, start + len(items)))
+        meta["mini_turns_in_current_sequence"] += len(items)
+        kinds = {"message": "message_output_item", "function_call": "tool_call_item",
+                 "function_call_output": "tool_call_output_item", "reasoning": "reasoning_item"}
+        self.runner._save_items_to_history(
+            self.context["_session_id"], meta["current_turn"],
+            [SimpleNamespace(type=kinds.get(item.get("type"), item.get("type", "message")),
+                             raw_item=item) for item in items],
+            self.agent.name, Path(self.context["_history_dir"]),
+        )
+
+    def finish(self, result):
+        if self.server_mode:
+            self.record_turn([item.to_input_item() for item in result.new_items[self.server_seen:]])
+            return
+        original = ItemHelpers.input_to_new_input_list(result.input)
+        full = original + [item.to_input_item() for item in result.new_items]
+        self.filter_input(ModelInputData(input=full, instructions=None))
+        kept = set(self.retained)
+        result.input = [item for index, item in enumerate(original) if index in kept]
+        result.new_items = [item for index, item in enumerate(result.new_items, len(original)) if index in kept]
+
+    async def on_llm_start(self, context, agent, system_prompt, input_items):
+        self.wrapper, self.agent = context, agent
+        meta = self.context["_context_meta"]
+        for key in ("current_turn", "total_turns_ever", "turns_in_current_sequence"):
+            meta[key] = meta.get(key, 0) + 1
+        await self.hooks.on_llm_start(context, agent, system_prompt, input_items)
+
+    async def on_llm_end(self, context, agent, response):
+        fields = ("total_tokens", "input_tokens", "output_tokens", "requests")
+        self.context["_last_response_usage"] = {key: getattr(response.usage, key) for key in fields}
+        self.context["_cumulative_usage"] = {key: getattr(context.usage, key) for key in fields}
+        tracker = self.context.get("_server_conversation_tracker")
+        if tracker is not None:
+            tracker.track_server_items(response)
+            self.server_pending = [item.model_dump(exclude_unset=True) for item in response.output]
+        await self.hooks.on_llm_end(context, agent, response)
+
+    async def on_agent_start(self, context, agent):
+        await self.hooks.on_agent_start(context, agent)
+
+    async def on_agent_end(self, context, agent, output):
+        await self.hooks.on_agent_end(context, agent, output)
+
+    async def on_handoff(self, context, from_agent, to_agent):
+        await self.hooks.on_handoff(context, from_agent, to_agent)
+
+    async def on_tool_start(self, context, agent, tool):
+        await self.hooks.on_tool_start(context, agent, tool)
+
+    async def on_tool_end(self, context, agent, tool, result):
+        await self.hooks.on_tool_end(context, agent, tool, result)

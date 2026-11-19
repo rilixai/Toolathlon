@@ -6,6 +6,10 @@ import datetime
 import traceback
 from enum import Enum
 import pickle
+from dataclasses import replace
+from agents import RunContextWrapper
+from agents.tracing import get_current_span, SpanError
+from utils.openai_agents_monkey_patch.custom_run_impl import _truncate_overlong_tool_output
 from pathlib import Path
 
 from agents import (
@@ -497,6 +501,20 @@ class TaskAgent:
         # Local FunctionTools keep their original callbacks but expose only
         # underscore aliases to the model.
         local_tools, local_name_aliases = alias_function_tools(local_tools)
+        # The SDK now owns tool execution. Keep Toolathlon's output limit on
+        # each original callback instead of overriding its removed RunImpl.
+        limited_tools = []
+        for tool in local_tools:
+            async def invoke(context, arguments, callback=tool.on_invoke_tool):
+                try:
+                    return _truncate_overlong_tool_output(await callback(context, arguments), context)
+                except Exception as error:
+                    span = get_current_span()
+                    if span is not None:
+                        span.set_error(SpanError(message="Error running tool", data={"error": str(error)}))
+                    return f"Error running tool {context.tool_name}: {error}"
+            limited_tools.append(replace(tool, on_invoke_tool=invoke))
+        local_tools = limited_tools
 
         # Prompt files are shared with other harnesses. Rewrite tool-name
         # references only in this OpenAI TaskAgent instance instead of editing
@@ -538,7 +556,7 @@ class TaskAgent:
         )
         
         # Get all available tools
-        available_tools = await self.agent.get_all_tools()
+        available_tools = await self.agent.get_all_tools(RunContextWrapper(self.shared_context))
         validate_model_tool_names(available_tools)
         for tool in available_tools:
             self.all_tools.append({
@@ -724,7 +742,7 @@ class TaskAgent:
                             starting_agent=self.agent,
                             input=self.logs,
                             context=self.shared_context,
-                            run_config=RunConfig(model_provider=self.agent_model_provider),
+                            run_config=RunConfig(model_provider=self.agent_model_provider, tool_not_found_behavior="return_error_to_model"),
                             hooks=self.run_hooks,
                             max_turns=remaining_steps,
                             history_dir=self.history_dir,
