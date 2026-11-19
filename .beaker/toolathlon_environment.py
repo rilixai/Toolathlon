@@ -86,7 +86,6 @@ def shared_checkout(cache: Path, source: Path) -> Path:
     digest = hashlib.sha256()
     for name in (
         "toolathlon_environment.py",
-        "toolathlon_container.patch",
         "toolathlon_container_agent.py",
         "toolathlon_native_trace.py",
     ):
@@ -128,7 +127,6 @@ def shared_checkout(cache: Path, source: Path) -> Path:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content)
             target.chmod(0o600)
-        subprocess.run(["git", "apply", str(HERE / "toolathlon_container.patch")], cwd=root, check=True)
         for name in ("toolathlon_container_agent.py", "toolathlon_native_trace.py"):
             shutil.copyfile(HERE / name, root / name)
         poste = root / "deployment/poste/scripts/setup.sh"

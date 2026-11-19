@@ -432,9 +432,17 @@ start_operation() {
   # registry pull is healthy; anything beyond that is a real failure.
   if ! kubectl --kubeconfig="$configpath" -n data rollout status statefulset/mysql-f1 --timeout=300s; then
     log_error "mysql-f1 rollout did not become ready within 5min — preprocess aborting"
-    log_info "Pod state for diagnostics:"
-    kubectl --kubeconfig="$configpath" -n data get pods -o wide --no-headers 2>/dev/null || true
-    kubectl --kubeconfig="$configpath" -n data describe pod mysql-f1-0 2>/dev/null | grep -E "Image|Pulling|Failed|Reason" | head -10 || true
+    local -a data_kubectl=(kubectl --kubeconfig="$configpath" --request-timeout=5s -n data)
+    local scheduling_message
+    scheduling_message=$("${data_kubectl[@]}" get pod mysql-f1-0 \
+      -o 'jsonpath={.status.conditions[?(@.type=="PodScheduled")].message}') || true
+    printf 'TOOLATHLON_PREPROCESS_ERROR: MySQL pod mysql-f1-0 was not ready after 5 minutes%s\n' \
+      "${scheduling_message:+: $scheduling_message}"
+    log_info "MySQL pod, storage and events:"
+    "${data_kubectl[@]}" get pods -o wide || true
+    "${data_kubectl[@]}" describe pod mysql-f1-0 || true
+    "${data_kubectl[@]}" describe pvc || true
+    "${data_kubectl[@]}" get events --sort-by=.lastTimestamp || true
     return 1
   fi
 

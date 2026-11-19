@@ -29,13 +29,16 @@ async def main():
     # cluster bring-up (port-already-bound, kind create error, orphan-
     # forwarder cleanup miss, etc.) surfaces as preprocess failure
     # instead of a silent "ready".
-    _, _, rc = await run_command(
+    _, stderr, rc = await run_command(
         f"bash {script_path} {args.port} start {args.agent_workspace}",
         debug=True, show_output=True,
     )
     if rc != 0:
-        print(f"k8s_pr_preview_testing.sh failed with returncode={rc}; aborting preprocess",
-              file=sys.stderr)
+        detail = " ".join(stderr.split())[-800:]
+        print(f"TOOLATHLON_PREPROCESS_ERROR: PR Preview setup failed (exit {rc})"
+              f"{': ' + detail if detail else ''}", file=sys.stderr)
+        if stderr:
+            print(stderr, file=sys.stderr)
         sys.exit(rc)
 
     print_color("Setting up Kubernetes cluster successfully!","green")

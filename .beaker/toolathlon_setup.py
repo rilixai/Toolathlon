@@ -17,8 +17,8 @@ from toolathlon_diagnostics import phase
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 UPSTREAM_REVISION = "9be8d8fe07a497b18ee61e3f2ae694e9797f39eb"
-# The SDK migration commit provides the trusted preparation and scoring sources.
-BASELINE_COMMIT = "f934f174f638b577622095e1d1446cf0cc626aa2"
+# This commit contains the migrated agent, trusted runner, and original graders.
+BASELINE_COMMIT = "09b8cd5c2d3bb9d759b7e2883d0981bb1ec0f56e"
 BASELINE_REPOSITORY = "https://github.com/rilixai/Toolathlon.git"
 
 
