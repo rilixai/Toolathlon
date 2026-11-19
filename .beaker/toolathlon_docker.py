@@ -200,27 +200,22 @@ def case_lease(cache: Path, source: Path, task: str, prefix: str, output: Path) 
             path.unlink()
 
 
-def collect_result(output: Path, task: str, image: str, image_id: str, exit_code: int) -> dict[str, object]:
+def collect_result(output: Path, task: str, image: str, image_id: str) -> dict[str, object]:
     task_root = output / "artifacts/finalpool" / task
-    trajectory = json.loads((task_root / "traj_log.json").read_text())
     evaluation = json.loads((task_root / "eval_res.json").read_text())
-    if evaluation.get("pass") is None and trajectory.get("status") != "success":
-        evaluation = {**evaluation, "pass": False}
+    if evaluation.get("pass") is None:
+        trajectory = json.loads((task_root / "traj_log.json").read_text())
+        if trajectory.get("status") != "success":
+            evaluation = {**evaluation, "pass": False}
     if type(evaluation.get("pass")) is not bool or evaluation.get("failure") in (
         "evaluation_error",
         "log_file_not_found",
         "preprocess_error",
     ):
         raise RuntimeError(f"Task {task} has no valid official evaluation: {evaluation}")
-    summary = {
-        "runner": "containerized",
+    return {
         "image": image,
         "image_id": image_id,
-        "task": task,
-        "status": "completed",
-        "exit_code": exit_code,
-        "agent_status": trajectory.get("status"),
-        "key_stats": trajectory.get("key_stats"),
         "evaluation": {"pass": evaluation["pass"], "details": json.dumps(evaluation, ensure_ascii=False)[:8000]},
         "workspace_files": sorted(
             p.relative_to(task_root / "workspace").as_posix()
@@ -228,9 +223,6 @@ def collect_result(output: Path, task: str, image: str, image_id: str, exit_code
             if p.is_file() and not p.is_symlink()
         ),
     }
-    (output / "artifacts/traj_log.json").write_text(json.dumps(trajectory))
-    (output / "result.json").write_text(json.dumps(summary))
-    return summary
 
 
 def run_containerized_agent(
@@ -300,7 +292,7 @@ def run_containerized_agent(
             else:
                 env.pop("TOOLATHLON_MODEL_PARAMS_FILE", None)
             with (output / "run.log").open("w") as log, phase("official preprocess / agent / evaluation"):
-                result = subprocess.run(
+                subprocess.run(
                     [
                         "bash",
                         "scripts/run_single_containerized.sh",
@@ -319,7 +311,7 @@ def run_containerized_agent(
                     stderr=log,
                     timeout=timeout,
                 )
-            return collect_result(output, task, image, image_id, result.returncode)
+            return collect_result(output, task, image, image_id)
     finally:
         if shared:
             for service in needed:

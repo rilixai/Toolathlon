@@ -259,18 +259,20 @@ async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> Ca
                         f"Toolathlon runner subprocess failed (exit {process.returncode}): {detail}"
                     )
 
-                summary = json.loads(response_path.read_text(encoding="utf-8"))
-                traj_path = output_dir / "artifacts/traj_log.json"
-                trajectory: dict[str, Any] = (
-                    json.loads(traj_path.read_text(encoding="utf-8")) if traj_path.is_file() else {}
-                )
+                traj_path = output_dir / "artifacts" / "finalpool" / task / "traj_log.json"
+                try:
+                    summary = json.loads(response_path.read_text(encoding="utf-8"))
+                    trajectory = json.loads(traj_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise RetryableCaseError(f"Toolathlon {task!r} returned unreadable rollout artifacts: {exc}") from exc
+                if not isinstance(summary, dict) or not isinstance(trajectory, dict):
+                    raise RetryableCaseError(f"Toolathlon {task!r} returned invalid rollout artifacts")
 
-                status = summary.get("status")
-                agent_status = summary.get("agent_status") or trajectory.get("status")
-                key_stats = summary.get("key_stats") or trajectory.get("key_stats") or {}
+                agent_status = trajectory.get("status")
+                key_stats = trajectory.get("key_stats") or {}
                 llm_requests = int(key_stats.get("agent_llm_requests") or 0) if isinstance(key_stats, Mapping) else 0
 
-                if status == "timeout" or agent_status == "timeout":
+                if agent_status == "timeout":
                     stage.output({"status": "timeout", "llm_requests": llm_requests})
                     raise RetryableCaseError(f"Toolathlon task {task!r} timed out after {DEFAULT_TIMEOUT_SECONDS}s")
 
@@ -283,11 +285,7 @@ async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> Ca
                     )
 
                 evaluation = summary.get("evaluation")
-                if (
-                    summary.get("runner") != "containerized"
-                    or not isinstance(evaluation, Mapping)
-                    or type(evaluation.get("pass")) is not bool
-                ):
+                if not isinstance(evaluation, Mapping) or type(evaluation.get("pass")) is not bool:
                     raise RetryableCaseError(
                         f"Toolathlon {task!r} did not return a valid official containerized evaluation"
                     )
