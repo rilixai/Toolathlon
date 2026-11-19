@@ -9,7 +9,6 @@ import signal
 import sys
 import tempfile
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,6 @@ from beaker import (
     Check,
     Integration,
     JsonValue,
-    RepositoryRunSetupResult,
     RetryableCaseError,
     RolloutRuntime,
     RunSetup,
@@ -102,11 +100,6 @@ class Row(BaseModel):
 
 class Setup(RunSetup[Row]):
     row_model = Row
-
-    @asynccontextmanager
-    async def prepare_run(self, *, runtime: SetupRuntime):
-        del runtime
-        yield {"repository": RepositoryRunSetupResult()}
 
     async def load_cases(self, row: Row, *, runtime: SetupRuntime) -> AsyncIterator[Case]:
         del runtime

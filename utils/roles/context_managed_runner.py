@@ -1,18 +1,16 @@
 # context_managed_runner.py (English version)
 import json
-import asyncio
 from typing import Dict, Any, List, Union, Optional
 from datetime import datetime
 from pathlib import Path
 
 from agents import Runner, RunConfig, RunHooks, Agent, RunResult
-from agents.run_context import RunContextWrapper, TContext
+from agents.run_context import RunContextWrapper
 from agents.items import (
     RunItem, TResponseInputItem, MessageOutputItem, 
-    ToolCallItem, ToolCallOutputItem, ItemHelpers,
+    ItemHelpers,
     ModelResponse
 )
-from agents.tool import Tool
 from agents.run_config import ModelInputData
 from types import SimpleNamespace
 import inspect

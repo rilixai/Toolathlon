@@ -9,7 +9,7 @@ from agents import (
     Model,
     _debug
 )
-from openai import AsyncOpenAI, NOT_GIVEN, NotGiven
+from openai import AsyncOpenAI, NOT_GIVEN
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText, ResponseReasoningItem, ResponseStreamEvent
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
