@@ -6,7 +6,7 @@
 # Cases share the VM's Docker daemon and applications; task/conflict locks
 # prevent overlapping mutations of the same benchmark resources.
 config_defaults:
-  max_concurrency: 6
+  max_concurrency: 10
 integrations:
   toolathlon_baseline:
     agent_key: toolathlon-harness
